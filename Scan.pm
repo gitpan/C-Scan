@@ -19,17 +19,20 @@ use strict;			# Earlier it catches ISA and EXPORT.
 # this flag tells cpp to only output macros
 $C::Scan::MACROS_ONLY = '-dM';
 
-$C::Scan::VERSION = '0.51';
+$C::Scan::VERSION = '0.6';
 
 my (%keywords,%style_keywords);
 for (qw(asm auto break case char continue default do double else enum
         extern float for fortran goto if int long register return short
-        sizeof static struct switch typedef union unsigned while void)) {
+        sizeof static struct switch typedef union unsigned signed while void)) {
   $keywords{$_}++;
 }
 for (qw(bool class const delete friend inline new operator overload private
         protected public virtual)) {
-  $style_keywords{'C++'}{$_}++;		
+  $style_keywords{'C++'}{$_}++;
+}
+for (qw(__func__ _Complex _Imaginary _Bool inline restrict)) {
+  $style_keywords{'C9X'}{$_}++;
 }
 for (qw(inline const asm noreturn format section 
 	constructor destructor unused weak)) {
@@ -46,7 +49,7 @@ my $recipes
       cppstdin => { default => $Config{cppstdin} },
       cppflags => { default => $Config{cppflags} },
       cppminus => { default => $Config{cppminus} },
-      c_styles => { default => ['C++', 'GNU'] },
+      c_styles => { default => [qw(C++ GNU C9X)] },
       add_cppflags => { default => '' },
       keywords => { prerequisites => ['c_styles'],
 		    output => sub {
@@ -359,6 +362,21 @@ sub typedef_words {		# Input is sanitized.
     $rest = substr $rest, pos $rest;
   }
   $in = $start . $rest;
+
+  # Deal with glibc's wierd ass __attribute__ tag.  Just dump it.
+  # Maaaybe this should check to see if you're using GCC, but I don't
+  # think so since glibc is nice enough to do that for you.  [MGS]
+  if ( $in =~ m/\b(__attribute__|attribute)\s*\((?=\s*\()/g ) {
+      my $att_pos_start = pos($in) - length($&);
+
+      # Need to figure out where ((..)) ends.
+      matchingbrace($in);
+      my $att_pos_end = pos $in;
+
+      # Remove the __attribute__ tag.
+      substr($in, $att_pos_start, $att_pos_end - $att_pos_start) = '';
+  }
+
   # Remove arguments of functions (heuristics only): 
   # paren word comma
   # paren word space non-paren
@@ -383,7 +401,7 @@ sub matchingbrace {
     return 1 if $n < 0;
   }
   # pos($_[0]) is after the closing brace now
-  return "";				# false
+  return;				# false
 }
 
 sub remove_Comments_no_Strings { # We expect that no strings are around
@@ -594,7 +612,7 @@ sub do_declaration1 {
 ############################################################
 
 package C::Preprocessed;
-use POSIX 'closedir';		# gensym only, not exported
+use Symbol;
 use File::Basename;
 use Config;
 
@@ -609,7 +627,7 @@ sub new {
     my $addincludes = "";
     $addincludes = "-I" . join(" -I", @$Includes)
       if defined $Includes and @$Includes;
-    my($sym) = $class->POSIX::gensym;
+    my($sym) = gensym;
     my $cmd = "echo '\#include \"$filename\"' | $Cpp->{cppstdin} $Defines $addincludes $Cpp->{cppflags} $Cpp->{cppminus} |";
     #my $cmd = "$Cpp->{cppstdin} $Defines $addincludes $Cpp->{cppflags} $Cpp->{cppminus} < $filename |";
     #my $cmd = "echo '\#include <$filename>' | $Cpp->{cppstdin} $Defines $addincludes $Cpp->{cppflags} $Cpp->{cppminus} |";

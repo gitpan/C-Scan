@@ -13,7 +13,6 @@ END {print "not ok 1\n" unless $::loaded;}
 require 'dumpvar.pl';
 use strict;
 use Carp;
-use blib;
 use C::Scan; 
 
 $::loaded = 1;

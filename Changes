@@ -27,4 +27,9 @@
           way to fix the previously mentioned bug).
 0.51:
 	Fixed EMX 0.9d "feature" that include file names have \\ in them.
-
+0.52:
+	Add PREREQ_PM.  (Thanks to Michael G Schwern.)
+	Handle glibc-style gcc int32_t declarations.
+	  (Thanks to Michael G Schwern.)
+	Change POSIX to Symbol.  (Thanks to Mike Blazer.)
+	Include C9X keywords.
