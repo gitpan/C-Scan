@@ -48,7 +48,7 @@
 0.71:	Recognize that a list of function arguments may look like (int);
 	There was a REx quadratic in the length of input.
 	Allow for '__extension__ typedef' syntax (what does it mean?).
-0.72:	Updates by Hugo <hv@crypt.compulink.co.uk>:
+0.72:	Updates by Hugo <hv@crypt0.demon.co.uk>:
 	  implement a new attribute 'typedef_structs'
 	  - adds one recipe, and two functions 'typedef_structs'
 	    and 'parse_struct'
@@ -76,3 +76,11 @@
 		      0  ARRAY(0x149f7c)
 		         0  'int __val [ 2'
 		         1  '];'
+0.73:	Updates by Hugo <hv@crypt0.demon.co.uk>:
+	  implement a new attribute 'vdecls_hash'
+	  cleanup and fix implementation of 'typedef_structs' (fixes above bug)
+	Related updates to documentation and test suite
+	  vdecls_hash test produces no output with current test file
+0.74:	Updates by Hugo <hv@crypt0.demon.co.uk>:
+	  fix regexp bug that misparses pointers
+	  add README to MANIFEST

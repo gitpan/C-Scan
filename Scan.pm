@@ -19,7 +19,7 @@ use strict;			# Earlier it catches ISA and EXPORT.
 # this flag tells cpp to only output macros
 $C::Scan::MACROS_ONLY = '-dM';
 
-$C::Scan::VERSION = '0.72';
+$C::Scan::VERSION = '0.74';
 
 my (%keywords,%style_keywords);
 for (qw(asm auto break case char continue default do double else enum
@@ -124,6 +124,7 @@ my $recipes
       mdecls => { filter => [ \&from_chunks, 'mdecl_chunks', 'text'], },
       vdecl_chunks => { filter => [ sub { shift->[3] }, 'decl_inlines'], },
       vdecls => { filter => [ \&from_chunks, 'vdecl_chunks', 'text'], },
+      vdecl_hash => { filter => [ \&vdecl_hash, 'vdecls', 'mdecls' ], },
       parsed_fdecls => { filter => [ \&do_declarations, 'fdecls', 
 				     'typedef_hash', 'keywords'], },
       keywords_rex => { filter => [ sub { my @k = keys %{ shift() };
@@ -378,46 +379,78 @@ sub typedef_structs {
 
 sub parse_struct {
   my($in, $structs) = @_;
-  my($struct, @type, $word, $id, $structname);
-  ($structname, $in) = $in =~ /^ \s* ( (?: struct | union ) (?: \s+ \w+ )? ) \s* { \s* (.*) } \s* $/gisx or return;
+  my($b, $e, $chunk, $vars, $struct, $structname);
+  ($structname, $in) = $in =~ /
+    ^ \s* ( (?: struct | union ) (?: \s+ \w+ )? ) \s* { \s* (.*?) \s* } \s* $
+  /gisx or return;
   $structname .= " _ANON" unless $structname =~ /\s/;
   $structname .= " 0" if exists $structs->{$structname};
   $structname =~ s/(\d+$)/$1 + 1/e while exists $structs->{$structname};
-  while ($in =~ /\G\s*(\S+?)(\s+|\b\s*)/g) {
-    $word = $1;
-    if ($word eq ';') {
-      next unless @type;
-      $id = pop @type;
-      @type = (join ' ', @type ? @type : 'int'); # or is this an error?
-      push @$struct, [ $type[0], $id ];
-      pop @type;
-    } elsif ($word eq ',') {
-      $id = pop @type;
-      @type = (join ' ', @type ? @type : 'int'); # or is this an error?
-      push @$struct, [ $type[0], $id ];
-    } elsif ($word eq '{') {
-      # we have an embedded struct or union, I hope
-      my $b = pos $in;
-      matchingbrace($in);
-      my $e = pos $in;
-      my $chunk = join ' ', @type, $word, substr($in, $b, pos($in) - $b);
-      if (@type && ($type[0] eq 'struct' || $type[0] eq 'union') && @type <= 2) {
-	@type = parse_struct($chunk, $structs);
-	pos($in) = $e;
-      } else {
-	warn "panic: not a struct or union; ignoring '$chunk'.\n";
-      }
+  $b = 0;
+  while ($in =~ /(\{|;|$)/g) {
+    matchingbrace($in), next if $1 eq '{';
+    $e = pos($in);
+    next if $b == $e;
+    $chunk = substr($in, $b, $e - $b);
+    $b = $e;
+    if ($chunk =~ /\G\s*(struct|union).*\}/gs) {
+      my $term = pos $chunk;
+      my $name = parse_struct(substr($chunk, 0, $term), $structs);
+      $vars = parse_vars(join ' ', $name, substr $chunk, $term);
     } else {
-      push @type, $word;
+      $vars = parse_vars($chunk);
     }
-  }
-  if (@type) {
-    $id = pop @type;
-    @type = (join ' ', @type ? @type : 'int'); # or is this an error?
-    push @$struct, [ $type[0], $id ];
+    push @$struct, @$vars;
   }
   $structs->{$structname} = $struct;
   $structname;
+}
+
+sub parse_vars {
+  my $in = shift;
+  my($vars, $type, $word, $id, $post);
+  while ($in =~ /\G\s*([\[;,]|\S+?\b|$)\s*/g) {
+    $word = $1;
+    if ($word eq ';' || $word eq '') {
+      next unless defined $id;
+      $type = 'int' unless defined $type;	# or is this an error?
+      push @$vars, [ $type, $post, $id ];
+      ($type, $post, $id) = (undef, undef, undef);
+    } elsif ($word eq ',') {
+      warn "panic: expecting name before comma in '$in'\n" unless defined $id;
+      $type = 'int' unless defined $type;	# or is this an error?
+      push @$vars, [ $type, $post, $id ];
+      $type =~ s/[ *]*$//;
+      $id = undef;
+    } elsif ($word eq '[') {
+      warn "panic: expecting name before '[' in '$in'\n" unless defined $id;
+      $type = 'int' unless defined $type;	# or is this an error?
+      my $b = pos $in;
+      matchingbrace($in);
+      $post .= $word . substr $in, $b, pos($in) - $b;
+    } else {
+      if (defined $post) {
+	warn "panic: not expecting '$word' after array bounds in '$in'\n";
+      } else {
+	$type = join ' ', grep defined, $type, $id if defined $id;
+	$id = $word;
+      }
+    }
+  }
+  $vars;
+}
+
+sub vdecl_hash {
+  my($vdecls, $mdecls) = @_;
+  my %vdecl_hash;
+  for (@$vdecls, @$mdecls) {
+    next if /[()]/;	# ignore functions, and function pointers
+    my $copy = $_;
+    next unless $copy =~ s/^\s*extern\s*//;
+    my $vars = parse_vars($copy);
+    $vdecl_hash{$_->[2]} = [ @$_[0, 1] ] for @$vars;
+  }
+  \%vdecl_hash;
 }
 
 # The output is the list of list of inline chunks and list of
@@ -964,11 +997,24 @@ Value: a reference to a list of C<typedef>ed names.  Heuristics are used.
 
 Value: a reference to a list of C<extern> variable declarations.
 
+=item C<vdecl_hash>
+
+Value: a reference to a hash of parsed C<extern> variable declarations,
+containing the variable names as keys. Values of the hash are array
+references of length 2, with what should be put before/after the name
+for a standalone extern variable declaration (but without the C<extern>
+substring).
+
 =item C<typedef_structs>
 
 Value: a reference to a hash of parsed struct declarations from typedefs.
-Keys are typedefed names, values are C<undef>s if not a struct, and array
-references (with what?) for values.
+Keys are typedefed names, values are C<undef> if not a struct or union,
+else an array reference of definitions of the elements of the structure;
+each definition is itself an array reference of length 3, consisting of
+what should be put before/after the name for a standalone variable
+declaration, followed by the name of the element. Anonymous structs and
+unions used within the definitions are given an arbitrary name including
+the string C<ANON>, and referred to using that name.
 
 =back
 
