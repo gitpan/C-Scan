@@ -45,3 +45,39 @@
 	Another attempt to remove $` etc.
 	Parse typedefs.
 	typedef_hash's has reasonable values.
+0.71:	Recognize that a list of function arguments may look like (int);
+	There was a REx quadratic in the length of input.
+	Allow for '__extension__ typedef' syntax (what does it mean?).
+0.72:	Updates by Hugo <hv@crypt0.demon.co.uk>:
+	  implement a new attribute 'typedef_structs'
+	  - adds one recipe, and two functions 'typedef_structs'
+	    and 'parse_struct'
+	  modifies the attribute 'typedef_texts' to remove #directives
+	  modifies the function 'typedef_texts' to avoid an unnecessary
+	    array copy
+	  modifies the function 'whited_decls' to white out the '+' character
+            within '[...]'. (A proper fix here would handle all legal
+	    expressions between the brackets, but that is well beyond the scope
+	    of this patch.)
+	  corrects the typo 'interwening'
+	  corrects the regexp matching continuation lines in function 'sanitize'.
+	Related updates to documentation (unfinished, since not explained), 
+	  related updates to the test suite.
+	Bug: Test produces typedef_structs which looks meaningless, such as
+		'typedef_hash' => HASH(0xbf440)
+		   '__fsid_t' => ARRAY(0x1298c8)
+		      0  ' struct
+  {
+    int __val[2];
+  } '
+		      1  ''
+		'typedef_structs' => HASH(0xc64d0)
+		   '__fsid_t' => ARRAY(0x149f64)
+		      0  ARRAY(0x149f7c)
+		         0  'int __val [ 2'
+		         1  '];'
+0.73beta:	Updates by Hugo <hv@crypt0.demon.co.uk>:
+	  implement a new attribute 'vdecls_hash'
+	  cleanup and fix implementation of 'typedef_structs' (fixes above bug)
+	Related updates to documentation and test suite
+	  vdecls_hash test produces no output with current test file

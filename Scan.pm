@@ -19,7 +19,7 @@ use strict;			# Earlier it catches ISA and EXPORT.
 # this flag tells cpp to only output macros
 $C::Scan::MACROS_ONLY = '-dM';
 
-$C::Scan::VERSION = '0.70';
+$C::Scan::VERSION = '0.73';
 
 my (%keywords,%style_keywords);
 for (qw(asm auto break case char continue default do double else enum
@@ -92,11 +92,14 @@ my $recipes
       typedef_chunks => { filter => [ \&typedef_chunks, 'full_toplevel'], },
       typedefs_maybe => { filter => [ sub {[keys %{+shift}]}, 'typedef_hash'], },
       typedefs_whited => { filter => [ \&typedefs_whited,
-				      'full_sanitized', 'typedef_chunks'], },
+				      'full_sanitized', 'typedef_chunks',
+				      'keywords_rex'], },
       typedef_texts => { filter => [ \&typedef_texts,
 				      'full_text', 'typedef_chunks'], },
       typedef_hash => { filter => [ \&typedef_hash,
 				    'typedef_texts', 'typedefs_whited'], },
+      typedef_structs => { filter => [ \&typedef_structs,
+				       'typedef_hash'], },
       defines_maybe => { filter => [ \&defines_maybe, 'filename'], },
       defines_no_args => { prerequisites => ['defines_maybe'],
 			   output => sub { shift->{defines_maybe}->[0] }, },
@@ -121,8 +124,14 @@ my $recipes
       mdecls => { filter => [ \&from_chunks, 'mdecl_chunks', 'text'], },
       vdecl_chunks => { filter => [ sub { shift->[3] }, 'decl_inlines'], },
       vdecls => { filter => [ \&from_chunks, 'vdecl_chunks', 'text'], },
+      vdecl_hash => { filter => [ \&vdecl_hash, 'vdecls', 'mdecls' ], },
       parsed_fdecls => { filter => [ \&do_declarations, 'fdecls', 
 				     'typedef_hash', 'keywords'], },
+      keywords_rex => { filter => [ sub { my @k = keys %{ shift() };
+					  local $" = '|';
+					  my $r = "(?:@k)";
+					  eval 'qr/$r/' or $r	# Older Perls
+					}, 'keywords'], },
     };
 
 sub from_chunks {
@@ -252,12 +261,15 @@ sub defines_full {
 
 sub typedef_texts {
   my ($txt, $chunks) = (shift, shift);
-  my ($b, $e, @out);
+  my ($b, $e, $in, @out);
   my @in = @$chunks;
   while (($b, $e) = splice @in, 0, 2) {
-    push @out, substr($txt, $b, $e - $b);
+    $in = substr($txt, $b, $e - $b);
+    # remove any remaining directives
+    $in =~ s/^ ( \s* \# .* ( \\ $ \n .* )* ) / ' ' x length($1)/xgem;
+    push @out, $in;
   }
-  [@out];
+  \@out;
 }
 
 sub typedef_hash_old {
@@ -355,6 +367,92 @@ sub typedef_chunks {		# Input is toplevel, output: starts and ends
   \@out;
 }
 
+sub typedef_structs {
+  my $typehash = shift;
+  my %structs;
+  while (my($key, $text) = each %$typehash) {
+    my $name = parse_struct($text->[0], \%structs);
+    $structs{$key} = defined($name) ? $structs{$name} : undef;
+  }
+  \%structs;
+}
+
+sub parse_struct {
+  my($in, $structs) = @_;
+  my($b, $e, $chunk, $vars, $struct, $structname);
+  ($structname, $in) = $in =~ /
+    ^ \s* ( (?: struct | union ) (?: \s+ \w+ )? ) \s* { \s* (.*?) \s* } \s* $
+  /gisx or return;
+  $structname .= " _ANON" unless $structname =~ /\s/;
+  $structname .= " 0" if exists $structs->{$structname};
+  $structname =~ s/(\d+$)/$1 + 1/e while exists $structs->{$structname};
+  $b = 0;
+  while ($in =~ /(\{|;|$)/g) {
+    matchingbrace($in), next if $1 eq '{';
+    $e = pos($in);
+    next if $b == $e;
+    $chunk = substr($in, $b, $e - $b);
+    $b = $e;
+    if ($chunk =~ /\G\s*(struct|union).*\}/gs) {
+      my $term = pos $chunk;
+      my $name = parse_struct(substr($chunk, 0, $term), $structs);
+      $vars = parse_vars(join ' ', $name, substr $chunk, $term);
+    } else {
+      $vars = parse_vars($chunk);
+    }
+    push @$struct, @$vars;
+  }
+  $structs->{$structname} = $struct;
+  $structname;
+}
+
+sub parse_vars {
+  my $in = shift;
+  my($vars, $type, $word, $id, $post);
+  while ($in =~ /\G\s*([\[;,]|\w+?\b|$)\s*/g) {
+    $word = $1;
+    if ($word eq ';' || $word eq '') {
+      next unless defined $id;
+      $type = 'int' unless defined $type;	# or is this an error?
+      push @$vars, [ $type, $post, $id ];
+      ($type, $post, $id) = (undef, undef, undef);
+    } elsif ($word eq ',') {
+      warn "panic: expecting name before comma in '$in'\n" unless defined $id;
+      $type = 'int' unless defined $type;	# or is this an error?
+      push @$vars, [ $type, $post, $id ];
+      $type =~ s/[ *]*$//;
+      $id = undef;
+    } elsif ($word eq '[') {
+      warn "panic: expecting name before '[' in '$in'\n" unless defined $id;
+      $type = 'int' unless defined $type;	# or is this an error?
+      my $b = pos $in;
+      matchingbrace($in);
+      $post .= $word . substr $in, $b, pos($in) - $b;
+    } else {
+      if (defined $post) {
+	warn "panic: not expecting '$word' after array bounds in '$in'\n";
+      } else {
+	$type = join ' ', grep defined, $type, $id if defined $id;
+	$id = $word;
+      }
+    }
+  }
+  $vars;
+}
+
+sub vdecl_hash {
+  my($vdecls, $mdecls) = @_;
+  my %vdecl_hash;
+  for (@$vdecls, @$mdecls) {
+    next if /[()]/;	# ignore functions, and function pointers
+    my $copy = $_;
+    next unless $copy =~ s/^\s*extern\s*//;
+    my $vars = parse_vars($copy);
+    $vdecl_hash{$_->[2]} = [ @$_[0, 1] ] for @$vars;
+  }
+  \%vdecl_hash;
+}
+
 # The output is the list of list of inline chunks and list of
 # declaration chunks.
 
@@ -391,11 +489,13 @@ sub functions_in {		# The arg is text without type declarations.
 	push @mdecls, $b + $b1, $e;
       } else  {			# Non-multiple.
 	my $isvar = 1;
+	# Since leading \s* is not optimized, this is quadratic!
 	$chunk =~ s{
-		    \s* ( ( const
-			    | __attribute__ \s* \( \s* \)
-			  ) \s* )* ( ; \s* )? \Z # Strip from the end
+		     ( ( const
+			 | __attribute__ \s* \( \s* \)
+		       ) \s* )* ( ; \s* )? \Z # Strip from the end
 		   }()x;
+	$chunk =~ s/\s*\Z//;
 	if ($chunk =~ /\)\Z/) { # Function declaration ends on ")"!
 	  if ($chunk !~ m{ 
 			  \( .* \( # Multiple parenths
@@ -423,7 +523,7 @@ sub typedefs_whited {		# Input is sanitized text, and list of beg/end.
   my ($b, $e);
   while ($b = shift @lst) {
     $e = shift @lst;
-    push @out, whited_decl(substr $_[0], $b, $e - $b);
+    push @out, whited_decl($_[2], substr $_[0], $b, $e - $b);
   }
   \@out;
 }
@@ -437,6 +537,7 @@ sub typedefs_whited {		# Input is sanitized text, and list of beg/end.
 # Now out of several words in a row the last one is a newly defined type.
 
 sub whited_decl {		# Input is sanitized.
+  my $keywords_rex = shift;
   my $in = shift;		# Text of a declaration
   my $rest  = $in;
   my $out  = $in;		# Whited out $in
@@ -468,11 +569,13 @@ sub whited_decl {		# Input is sanitized.
       pos $out = $att_pos_end;
   }
 
-  # Remove arguments of functions (heuristics only):
+  # Remove arguments of functions (heuristics only).
+  # These things (start) arglist of a declared function:
   # paren word comma
   # paren word space non-paren
+  # paren keyword paren
   # start a list of arguments. (May be "cdecl *myfunc"?) XXXXX ?????
-  while ( $out =~ /(\(\s*\w+(,|\s+[^\)\s]))/g ) {
+  while ( $out =~ /(\(\s*(\w+(,|\s+[^\)\s])|$keywords_rex\s*\)))/g ) {
     my $pos_start = pos($out) - length($1);
     pos $out = $pos_start + 1;
     matchingbrace($out);
@@ -480,7 +583,7 @@ sub whited_decl {		# Input is sanitized.
       = ' ' x (pos($out) - 2 - $pos_start);
   }
   # Remove array specifiers
-  $out =~ s/(\[[\w\s]*\])/ ' ' x length $1 /ge;
+  $out =~ s/(\[[\w\s\+]*\])/ ' ' x length $1 /ge;
   my $tout = $out;
   # Several words in a row cannot be new typedefs, but the last one.
   $out =~ s/((\w+\s+)+(?=[^\s,;\[\{\)]))/ ' ' x length $1 /ge;
@@ -495,7 +598,7 @@ sub whited_decl {		# Input is sanitized.
   warn "panic: length mismatch\n\t'$in'\nwhited-out as\n\t'$out'\n"
     if length($in) != length $out;
   # Sanity check
-  warn "panic: multiple types without interwening comma in\n\t$in\nwhited-out as\n\t$out\n"
+  warn "panic: multiple types without intervening comma in\n\t$in\nwhited-out as\n\t$out\n"
     if $out =~ /\w[^\w,]+\w/;
   warn "panic: no types found in\n\t$in\nwhited-out as\n\t$out\n"
     unless $out =~ /\w/;
@@ -531,7 +634,7 @@ sub sanitize {		# We expect that no strings are around
 	     | '((?:[^\\\']|\\.)+)'	# (2) Character constants
 	     | "((?:[^\\\"]|\\.)*)"	# (3) Strings
 	     | ( ^ \s* \# .* 		# (4) Preprocessor
-		 ( \\ $ .* )* )		# and continuation lines
+		 ( \\ $ \n .* )* )	# and continuation lines
 	    } {
 	      # We want to preserve the length, so that one may go back
 	      defined $1 ? ' ' x (1 + length $1) :
@@ -559,6 +662,7 @@ sub top_level {			# We expect argument is sanitized
 
 sub remove_type_decl {		# We suppose that the arg is top-level only.
   my $in = shift;
+  $in =~ s/(\b__extension__)(\s+typedef\b)/(' ' x length $1) . $2/gse;
   $in =~ s/(\btypedef\b.*?;)/' ' x length $1/gse;
   # The following form may appear only in the declaration of the type itself:
   $in =~ 
@@ -892,6 +996,25 @@ Value: a reference to a list of C<typedef>ed names.  Heuristics are used.
 =item C<vdecls>
 
 Value: a reference to a list of C<extern> variable declarations.
+
+=item C<vdecl_hash>
+
+Value: a reference to a hash of parsed C<extern> variable declarations,
+containing the variable names as keys. Values of the hash are array
+references of length 2, with what should be put before/after the name
+for a standalone extern variable declaration (but without the C<extern>
+substring).
+
+=item C<typedef_structs>
+
+Value: a reference to a hash of parsed struct declarations from typedefs.
+Keys are typedefed names, values are C<undef> if not a struct or union,
+else an array reference of definitions of the elements of the structure;
+each definition is itself an array reference of length 3, consisting of
+what should be put before/after the name for a standalone variable
+declaration, followed by the name of the element. Anonymous structs and
+unions used within the definitions are given an arbitrary name including
+the string C<ANON>, and referred to using that name.
 
 =back
 
