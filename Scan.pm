@@ -19,7 +19,7 @@ use strict;			# Earlier it catches ISA and EXPORT.
 # this flag tells cpp to only output macros
 $C::Scan::MACROS_ONLY = '-dM';
 
-$C::Scan::VERSION = '0.5';
+$C::Scan::VERSION = '0.51';
 
 my (%keywords,%style_keywords);
 for (qw(asm auto break case char continue default do double else enum
@@ -154,6 +154,7 @@ sub includes {
 		 )x;
     my $include = $3;
     $include = $1 if $include =~ /"(.*)"/; # Filename may be in quotes
+    $include =~ s,\\\\,/,g if $^O eq 'os2';
     $seen{$include}++ if $include ne "";
   }
   [keys %seen];

@@ -25,3 +25,6 @@
 	Un-fixed bugfix in 0.4 that actually broke procesing
 	Added '__const' to list of keywords (which was the appropriate
           way to fix the previously mentioned bug).
+0.51:
+	Fixed EMX 0.9d "feature" that include file names have \\ in them.
+
