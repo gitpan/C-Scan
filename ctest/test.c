@@ -17,4 +17,5 @@
 #define abcd1(x,y,z) blah \
 	foo(y)
 
-__inline__ int func(int i) { return i++; }
+__inline__ int inline_func(int i) { return i++; }
+extern int extern_func(int i);

@@ -3,7 +3,7 @@ package C::Scan;
 require Exporter;
 use Config '%Config';
 use File::Basename;
-use DataFlow;
+use Data::Flow;
 #use strict;			# Earlier it catches ISA and EXPORT.
 
 @C::Scan::ISA = qw(Exporter);
@@ -47,10 +47,14 @@ my $recipes
 		      }
 		      \%kw;
 		    }, },
+      undef => { default => undef },
+      filename_filter => { default => undef },
+      full_text => { class_filter => [ 'text', 'C::Preprocessed',
+				       qw(undef filename Defines includeDirs Cpp)] },
       text => { class_filter => [ 'text', 'C::Preprocessed',
-				  qw(filename Defines includeDirs Cpp)] },
+				  qw(filename_filter filename Defines includeDirs Cpp)] },
       text_only_from => { class_filter => [ 'text_only_from', 'C::Preprocessed',
-					    qw(filename filename Defines includeDirs Cpp)] },
+					    qw(filename_filter filename Defines includeDirs Cpp)] },
       includes => { filter => [ \&includes, 
 				qw(filename Defines includeDirs Cpp) ], },
       includeDirs =>  { prerequisites => ['filedir'], 
@@ -68,12 +72,14 @@ my $recipes
       filedir => { output => sub { dirname ( shift->{filename} || '.' ) } },
       sanitized => { filter => [ \&sanitize, 'text'], },
       toplevel => { filter => [ \&top_level, 'sanitized'], },
+      full_sanitized => { filter => [ \&sanitize, 'full_text'], },
+      full_toplevel => { filter => [ \&top_level, 'full_sanitized'], },
       no_type_decl => { filter => [ \&remove_type_decl, 'toplevel'], },
-      typedef_chunks => { filter => [ \&typedef_chunks, 'toplevel'], },
+      typedef_chunks => { filter => [ \&typedef_chunks, 'full_toplevel'], },
       typedefs_maybe => { filter => [ \&typedefs_maybe, 
-				      'sanitized', 'typedef_chunks'], },
+				      'full_sanitized', 'typedef_chunks'], },
       typedef_texts => { filter => [ \&typedef_texts, 
-				      'text', 'typedef_chunks'], },
+				      'full_text', 'typedef_chunks'], },
       typedef_hash => { prerequisites => ['typedefs_maybe'],
 			output => sub { my %h; 
 					for (@{$_[0]->{typedefs_maybe}}) {
@@ -372,7 +378,7 @@ sub remove_type_decl {		# We suppose that the arg is top-level only.
   $in;
 }
 
-sub new { shift; my $out = new DataFlow $recipes;  $out->set(@_); $out}
+sub new { shift; my $out = new Data::Flow $recipes;  $out->set(@_); $out}
 
 sub do_declarations {
   my @d = map do_declaration($_, $_[1], $_[2]), @{ $_[0] };
@@ -386,6 +392,7 @@ sub do_declaration {
   my ($decl, $typedefs, $keywords, $argnum) = @_;
   $decl =~ s/;?\s*$//;
   my ($type, $typepre, $typepost, $ident, $args, $w, $pos);
+  $decl =~ s/^\s*extern\b\s*//;
   $pos = 0;
   while ($decl =~ /(\w+)/g and ($typedefs->{$1} or $keywords->{$1})) {
     $w = $1;
@@ -418,7 +425,8 @@ sub do_declaration {
   $pos = pos $decl;
   if (pos $decl != length $decl) {
     pos $decl = $pos;
-    die "Expecting parenth after identifier in `$decl'" 
+    die "Expecting parenth after identifier in `$decl'\nafter `",
+      substr($decl, 0, $pos), "'"
       unless $decl =~ /\G\(/g;
     my $argstring = substr($decl, pos($decl) - length $decl);
     matchingbrace($argstring) or die "Cannot find matching parenth in `$decl'";
@@ -525,7 +533,7 @@ sub new {
     die "usage: C::Preprocessed->new(filename[, defines[, includes[, cpp]]])" 
       if @_ < 2 or @_ > 5;
     my ($class, $filename, $Defines, $Includes, $Cpp) 
-      = (shift, shift, shift, shift);
+      = (shift, shift, shift, shift, shift);
     $Cpp ||= \%Config::Config;
     my $filedir = dirname $filename || '.';
     $Includes ||= [$filedir, '/usr/local/include', '.'];
@@ -540,6 +548,10 @@ sub new {
 
 sub text {
   my $class = shift;
+  my $filter = shift;
+  if (defined $filter) {
+    return text_only_from($class, $filter, @_);
+  }
   my $stream = $class->new(@_);
   my $oh = select $stream;
   $/ = undef;
