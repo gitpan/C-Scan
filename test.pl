@@ -36,7 +36,7 @@ $vde = $c->get('vdecls');
 $fdec = $c->get('parsed_fdecls');
 
 require 'dumpvar.pl';
-dumpValue({defines_noargs => $dna, defines_args => $da, 
-	   typedef_texts => $t, typedefs => $td, inlines => $fi, 
+dumpValue({defines_no_args => $dna, defines_args => $da, 
+	   typedef_texts => $t, typedefs_maybe => $td, inlines => $fi, 
 	   mdecls => $mde, vdecls => $vde, fdecls => $fde, 
 	   parsed_fdecls => $fdec, typedef_hash => $tdh});

@@ -2,3 +2,7 @@
 	Changed to use Data::Flow, strips extern from function declarations.
 	Can reliably restrict attention to some included file. 
 	Cpp no longer ignored.
+0.3:
+	Will not bark if an argument to a function is an array.
+	Minor misprint corrected. 
+	Minimal documentation added.

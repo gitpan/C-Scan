@@ -19,3 +19,6 @@
 
 __inline__ int inline_func(int i) { return i++; }
 extern int extern_func(int i);
+extern int myarray[56];
+extern int myfunc(int myarrayarg[56]);
+extern int (*myfuncp[45])(int arrayarg[56]);

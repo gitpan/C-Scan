@@ -26,9 +26,14 @@ for (qw(bool class const delete friend inline new operator overload private
         protected public virtual)) {
   $style_keywords{'C++'}{$_}++;		
 }
-for (qw(__inline__ __attribute__ __const__ __asm__)) {
+for (qw(inline const asm noreturn format section 
+	constructor destructor unused weak)) {
   $style_keywords{'GNU'}{$_}++;
+  $style_keywords{'GNU'}{"__$ {_}__"}++;
 }
+  $style_keywords{'GNU'}{__attribute__}++;
+  $style_keywords{'GNU'}{__extension__}++;
+  $style_keywords{'GNU'}{__consts}++;
 
 my $recipes
   = { Defines => { default => '' },
@@ -224,7 +229,7 @@ sub functions_in {		# The arg is text without type declarations.
   my ($b, $e, $b1, $e1, @inlines, @decls, @mdecls, @fdecls, @vdecls);
   $b = pos $in;
   my $chunk;
-  while ($b ne length $in) {
+  while ($b != length $in) {
     $in =~ /;/g or pos $in = $b, $in =~ /.*\S|\Z/g ; # Or last non-space
     $e = pos $in;
     $chunk = substr $in, $b, $e - $b;
@@ -391,7 +396,7 @@ sub do_declarations {
 sub do_declaration {
   my ($decl, $typedefs, $keywords, $argnum) = @_;
   $decl =~ s/;?\s*$//;
-  my ($type, $typepre, $typepost, $ident, $args, $w, $pos);
+  my ($type, $typepre, $typepost, $ident, $args, $w, $pos, $repeater);
   $decl =~ s/^\s*extern\b\s*//;
   $pos = 0;
   while ($decl =~ /(\w+)/g and ($typedefs->{$1} or $keywords->{$1})) {
@@ -407,8 +412,9 @@ sub do_declaration {
   $decl =~ /\G\s*/g or pos $decl = length $type; # ????
   $pos = pos $decl;
   if (defined $argnum) {
-    if ($decl =~ /\G(\w+)/g) {
+    if ($decl =~ /\G(\w+)((\s*\[[^][]*\])*)/g) { # The best we can do with [2]
       $ident = $1;
+      $repeater = $2;
       $pos = pos $decl;
     } else {
       pos $decl = $pos = length $decl;
@@ -453,13 +459,13 @@ sub do_declaration {
       push @$args, do_declaration1($_, $typedefs, $keywords, $i++);
     }
   }
-  [$type, $ident, $args, $decl];
+  [$type, $ident, $args, $decl, $repeater];
 }
 
 sub do_declaration1 {
   my ($decl, $typedefs, $keywords, $argnum) = @_;
   $decl =~ s/;?\s*$//;
-  my ($type, $typepre, $typepost, $ident, $args, $w, $pos);
+  my ($type, $typepre, $typepost, $ident, $args, $w, $pos, $repeater);
   $pos = 0;
   while ($decl =~ /(\w+)/g and ($typedefs->{$1} or $keywords->{$1})) {
     $w = $1;
@@ -474,8 +480,9 @@ sub do_declaration1 {
   $decl =~ /\G\s*/g or pos $decl = length $type; # ????
   $pos = pos $decl;
   if (defined $argnum) {
-    if ($decl =~ /\G(\w+)/g) {
+    if ($decl =~ /\G(\w+)((\s*\[[^][]*\])*)/g) { # The best we can do with [2]
       $ident = $1;
+      $repeater = $2;
       $pos = pos $decl;
     } else {
       pos $decl = $pos = length $decl;
@@ -492,7 +499,8 @@ sub do_declaration1 {
   $pos = pos $decl;
   if (pos $decl != length $decl) {
     pos $decl = $pos;
-    die "Expecting parenth after identifier in `$decl'" 
+    die "Expecting parenth after identifier in `$decl'\nafter `",
+      substr($decl, 0, $pos), "'"
       unless $decl =~ /\G\(/g;
     my $argstring = substr($decl, pos($decl) - length $decl);
     matchingbrace($argstring) or die "Cannot find matching parenth in `$decl'";
@@ -519,7 +527,7 @@ sub do_declaration1 {
       push @$args, do_declaration2($_, $typedefs, $keywords, $i++);
     }
   }
-  [$type, $ident, $args, $decl];
+  [$type, $ident, $args, $decl, $repeater];
 }
 
 ############################################################
@@ -541,8 +549,11 @@ sub new {
     $addincludes = "-I" . join(" -I", @$Includes)
       if defined $Includes and @$Includes;
     my($sym) = $class->POSIX::gensym;
-    open($sym, 
-	 "cat $filename | $Cpp->{cppstdin} $Defines $addincludes $Cpp->{cppflags} $Cpp->{cppminus} |" )
+    my $cmd = "echo '\#include \"$filename\"' | $Cpp->{cppstdin} $Defines $addincludes $Cpp->{cppflags} $Cpp->{cppminus} |";
+    #my $cmd = "$Cpp->{cppstdin} $Defines $addincludes $Cpp->{cppflags} $Cpp->{cppminus} < $filename |";
+    #my $cmd = "echo '\#include <$filename>' | $Cpp->{cppstdin} $Defines $addincludes $Cpp->{cppflags} $Cpp->{cppminus} |";
+
+    (open($sym, $cmd) or die "Cannot open pipe from `$cmd': $!")
       and bless $sym => $class;
 }
 
@@ -591,35 +602,101 @@ __END__
 
 C::Scan - scan C language files for easily recognized constructs.
 
+=head1 SYNOPSIS
+
+  $c = new C::Scan 'filename' => $filename, 'filename_filter' => $filter,
+                   'add_cppflags' => $addflags;
+  $c->set('includeDirs' => [$Config::Config{shrpdir}]);
+  
+  my $fdec = $c->get('parsed_fdecls');
+
+
 =head1 DESCRIPTION
 
-=head2 Service
+B<This description is I<VERY> incomplete.>
 
-=over 10
+This module uses C<Data::Flow> interface, thus one uses it in the
+following fashion:
 
-=item includes
+  $c = new C::Scan(attr1 => $value1, attr2 => $value2);
+  $c->set( attr3 => $value3 );
 
-Arguments: filename, optional string with "defines" to use,
-and optional reference to a list of include directories.
+  $value4 = $c->get('attr4');
 
-Output: list of included files.
+Attributes are depending on some other attributes. The only
+I<required> attribute, i.e., the attribute which I<should> be set, is
+C<filename>, which denotes which file to parse.
 
-=item defines_maybe
+All other attributes are either optional, or would be calculated basing on values of required and optional attributes.
 
-Argument: filename.
+=head2 Output attributes
 
-Output: reference to a list containing reference to hash of macros
-without arguments, and reference to hash of macros with arguments. The
-values of the second hash are references to an array of length 2, the
-first element is a reference to the list of arguments, the second one
-being the expansion.  Both have newlines unescaped, thus
+=over 14
 
-  #define A B
+=item C<includes>
+
+Value: reference to a list of included files.
+
+=item C<defines_args>
+
+Value: reference to hash of macros with arguments. The values are
+references to an array of length 2, the first element is a reference
+to the list of arguments, the second one being the expansion.
+Newlines are not unescaped, thus
+
   #define C(x,y) E\
                  F
 
-will finish with the first hash being C<("A" =E<gt> "B")>, the second 
-one with C<("C" =E<gt> [ ["x", "y"], "E\nF"])>.
+will finish with C<("C" =E<gt> [ ["x", "y"], "E\nF"])>.
+
+=item C<defines_no_args>
+
+Value: reference to hash of macros without arguments.  Newlines are
+not escaped, thus
+
+  #define A B
+
+will finish with C<("A" =E<gt> "B")>.
+
+=item C<fdecls>
+
+Value: reference to list of declarations of functions.
+
+=item C<inlines>
+
+Value: reference to list of definitions of functions.
+
+=item C<parsed_fdecls>
+
+Value: reference to list of parsed declarations of functions. 
+
+A parsed declaration is a reference to a list of C<(rt, nm, args, ft,
+mod)>. Here C<rt> is return type of a function, C<nm> is the name,
+C<args> is the list of arguments, C<ft> is the full text of the
+declaration, and C<mod> is the modifier (which is always C<undef>).
+
+Each entry in the list C<args> is of the same form C<(ty, nm, args,
+ft, mod)>, here C<ty> is the type of an argument, C<nm> is the name (a
+generated one if missing in the declaration), C<args> is C<undef>, and
+C<mod> is the string of array modifiers.
+
+=item C<typedef_hash>
+
+Value: a reference to a hash which contains known C<typedef>s as keys.
+
+=item C<typedef_texts>
+
+Value: a reference to a list which contains known expansions of
+C<typedef>s.
+
+=item C<typedefs_maybe>
+
+Value: a reference to a list of C<typedef>ed names. (Syncronized with
+C<typedef_texts>).
+
+=item C<vdecls>
+
+Value: a reference to a list of C<extern> variable declarations.
 
 =back
 
