@@ -21,3 +21,7 @@
 	   which is a legal macro.
 	Fixed regexp bug which did TOO minimal a match on some
 	  argument lists.
+0.5:
+	Un-fixed bugfix in 0.4 that actually broke procesing
+	Added '__const' to list of keywords (which was the appropriate
+          way to fix the previously mentioned bug).

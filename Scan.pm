@@ -19,7 +19,7 @@ use strict;			# Earlier it catches ISA and EXPORT.
 # this flag tells cpp to only output macros
 $C::Scan::MACROS_ONLY = '-dM';
 
-$C::Scan::VERSION = '0.4';
+$C::Scan::VERSION = '0.5';
 
 my (%keywords,%style_keywords);
 for (qw(asm auto break case char continue default do double else enum
@@ -39,6 +39,7 @@ for (qw(inline const asm noreturn format section
   $style_keywords{'GNU'}{__attribute__}++;
   $style_keywords{'GNU'}{__extension__}++;
   $style_keywords{'GNU'}{__consts}++;
+  $style_keywords{'GNU'}{__const}++;
 
 my $recipes
   = { Defines => { default => '' },
@@ -539,10 +540,7 @@ sub do_declaration1 {
   $decl =~ /\G\s*/g or pos $decl = length $type; # ????
   $pos = pos $decl;
   if (defined $argnum) {
-    # NOTE: we need the '(repeat_group)+' in the following regexp as
-    # opposed to (repeat_group)*, otherwise it will match only on the
-    # (\w+) ... which is not what we want
-    if ($decl =~ /\G(\w+)((\s*\[[^][]*\])+)/g) { # The best we can do with [2]
+    if ($decl =~ /\G(\w+)((\s*\[[^][]*\])*)/g) { # The best we can do with [2]
       $ident = $1;
       $repeater = $2;
       $pos = pos $decl;
