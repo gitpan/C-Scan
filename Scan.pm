@@ -3,10 +3,10 @@ package C::Scan;
 require Exporter;
 use Config '%Config';
 use File::Basename;
-use Data::Flow;
-#use strict;			# Earlier it catches ISA and EXPORT.
+use Data::Flow qw(0.05);
+use strict;			# Earlier it catches ISA and EXPORT.
 
-@C::Scan::ISA = qw(Exporter);
+@C::Scan::ISA = qw(Exporter Data::Flow);
 
 # Items to export into callers namespace by default. Note: do not export
 # names by default without a very good reason. Use EXPORT_OK instead.
@@ -16,7 +16,12 @@ use Data::Flow;
 	    );
 @C::Scan::EXPORT_OK = qw(
 			);
-my %keywords;
+# this flag tells cpp to only output macros
+$C::Scan::MACROS_ONLY = '-dM';
+
+$C::Scan::VERSION = '0.4';
+
+my (%keywords,%style_keywords);
 for (qw(asm auto break case char continue default do double else enum
         extern float for fortran goto if int long register return short
         sizeof static struct switch typedef union unsigned while void)) {
@@ -52,7 +57,7 @@ my $recipes
 		      }
 		      \%kw;
 		    }, },
-      undef => { default => undef },
+      'undef' => { default => undef },
       filename_filter => { default => undef },
       full_text => { class_filter => [ 'text', 'C::Preprocessed',
 				       qw(undef filename Defines includeDirs Cpp)] },
@@ -97,6 +102,14 @@ my $recipes
 			   output => sub { shift->{defines_maybe}->[0] }, },
       defines_args => { prerequisites => ['defines_maybe'],
 			output => sub { shift->{defines_maybe}->[1] }, },
+
+      defines_full => { filter => [ \&defines_full, 
+				    qw(filename Defines includeDirs Cpp) ], },
+      defines_no_args_full => { prerequisites => ['defines_full'],
+				output => sub { shift->{defines_full}->[0] }, },
+      defines_args_full => { prerequisites => ['defines_full'],
+			output => sub { shift->{defines_full}->[1] }, },
+
       decl_inlines => { filter => [ \&functions_in, 'no_type_decl'], },
       inline_chunks => { filter => [ sub { shift->[0] }, 'decl_inlines'], },
       inlines => { filter => [ \&from_chunks, 'inline_chunks', 'text'], },
@@ -160,7 +173,7 @@ sub defines_maybe {
                                     # in parenths (without trailing
                                     # spaces)
 		   )?		# optional, no grouping
-		   \s+		# rest is the definition
+		   \s*		# rest is the definition
 		  ][]x );
     ($sym, $args) = ($1, $2);
     $mline = $';
@@ -174,6 +187,46 @@ sub defines_maybe {
     }
   }
   close(C) or die "Cannot close file $file: $!\n";
+  [\%macros, \%macrosargs];
+}
+
+sub defines_full {
+  my $Cpp = $_[3];
+  my ($mline,$line,%macros,%macrosargs,$sym,$args);
+
+  # save the old cppflags and add the flag for only ouputting macro definitions
+  my $old_cppstdin = $Cpp->{'cppstdin'};
+  $Cpp->{'cppstdin'} = $old_cppstdin . " " . $C::Scan::MACROS_ONLY;
+
+  my $stream = new C::Preprocessed (@_)
+    or die "Cannot open pipe from cppstdin: $!\n";
+  
+  while (defined ($line = <$stream>)) {
+    next unless 
+      ( $line =~ s[
+		   ^ \s* \# \s*	# Start of directive
+		   define \s+
+		   (\w+)	# 1: symbol
+		   (?:
+		    \( (.*?) \s* \) # 2: Minimal match for arguments
+                                    # in parenths (without trailing
+                                    # spaces)
+		   )?		# optional, no grouping
+		   \s*		# rest is the definition
+		  ][]x );
+    ($sym, $args) = ($1, $2);
+    $mline = $';
+    $mline .= <$stream> while ($mline =~ s/\\\n/\n/);
+    chomp $mline;
+#print STDERR "sym: `$sym', args: `$args', mline: `$mline'\n";
+    if (defined $args) {
+      $macrosargs{$sym} = [ [split /\s*,\s*/, $args], $mline];
+    } else {
+      $macros{$sym} = $mline;
+    }
+  }
+  # restore the original cppflags
+  $Cpp->{'cppstdin'} = $old_cppstdin;
   [\%macros, \%macrosargs];
 }
 
@@ -294,7 +347,8 @@ sub typedefs_maybe {		# Input is sanitized text, and list of beg/end.
 sub typedef_words {		# Input is sanitized.
   my $in = shift;		# Text of typedef.
   # Remove all the structs
-  my ($rest, $start) = $in;
+  my $rest  = $in;
+  my $start = "";
   while ($rest =~ s/\b(struct|union|class|enum)(\s+\w+)?\s*\{//) {
     $rest = $';
     $start .= $`;
@@ -383,7 +437,12 @@ sub remove_type_decl {		# We suppose that the arg is top-level only.
   $in;
 }
 
-sub new { shift; my $out = new Data::Flow $recipes;  $out->set(@_); $out}
+sub new { 
+  my $class = shift; 
+  my $out = SUPER::new $class $recipes;  
+  $out->set(@_); 
+  $out;
+}
 
 sub do_declarations {
   my @d = map do_declaration($_, $_[1], $_[2]), @{ $_[0] };
@@ -480,7 +539,10 @@ sub do_declaration1 {
   $decl =~ /\G\s*/g or pos $decl = length $type; # ????
   $pos = pos $decl;
   if (defined $argnum) {
-    if ($decl =~ /\G(\w+)((\s*\[[^][]*\])*)/g) { # The best we can do with [2]
+    # NOTE: we need the '(repeat_group)+' in the following regexp as
+    # opposed to (repeat_group)*, otherwise it will match only on the
+    # (\w+) ... which is not what we want
+    if ($decl =~ /\G(\w+)((\s*\[[^][]*\])+)/g) { # The best we can do with [2]
       $ident = $1;
       $repeater = $2;
       $pos = pos $decl;

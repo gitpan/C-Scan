@@ -6,3 +6,18 @@
 	Will not bark if an argument to a function is an array.
 	Minor misprint corrected. 
 	Minimal documentation added.
+0.4:
+	Made new() use two arg version of bless to allow subclassing
+	Made C::Scan a subclass of Data::Flow.
+	Added new attributes defines_full, defines_args_full, and
+           defines_no_args_full which use cpp -dM to get fully
+           resolved #defines.
+	Added $C::Scan::MACROS_ONLY which defaults to '-dM'
+	Fixed up test.pl a bit to output to a file, and to give more
+	   standard testing output.
+	Fixed regexp bug that didn't allow macros with any space
+	   between the end of the argument list and the beginning of
+	   the body section, e.g. #define FOO_NAME(bar)((BAZ*) fooBAR(bar))->baz
+	   which is a legal macro.
+	Fixed regexp bug which did TOO minimal a match on some
+	  argument lists.

@@ -3,7 +3,8 @@ use ExtUtils::MakeMaker;
 # the contents of the Makefile that is written.
 WriteMakefile(
     'NAME'	=> 'C::Scan',
-    'VERSION'	=> '0.3',
+    'dist'      => { COMPRESS => 'gzip', SUFFIX => '.gz'},
+    'VERSION_FROM' => 'Scan.pm', # finds $VERSION
     'LIBS'	=> [''],   # e.g., '-lm' 
     'DEFINE'	=> '',     # e.g., '-DHAVE_SOMETHING' 
     'INC'	=> '',     # e.g., '-I/usr/include/other' 
