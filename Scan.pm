@@ -1,0 +1,614 @@
+package C::Scan;
+
+require Exporter;
+use Config '%Config';
+use File::Basename;
+use DataFlow;
+#use strict;			# Earlier it catches ISA and EXPORT.
+
+@C::Scan::ISA = qw(Exporter);
+
+# Items to export into callers namespace by default. Note: do not export
+# names by default without a very good reason. Use EXPORT_OK instead.
+# Do not simply export all your public functions/methods/constants.
+
+@C::Scan::EXPORT = qw(
+	    );
+@C::Scan::EXPORT_OK = qw(
+			);
+my %keywords;
+for (qw(asm auto break case char continue default do double else enum
+        extern float for fortran goto if int long register return short
+        sizeof static struct switch typedef union unsigned while void)) {
+  $keywords{$_}++;
+}
+for (qw(bool class const delete friend inline new operator overload private
+        protected public virtual)) {
+  $style_keywords{'C++'}{$_}++;		
+}
+for (qw(__inline__ __attribute__ __const__ __asm__)) {
+  $style_keywords{'GNU'}{$_}++;
+}
+
+my $recipes
+  = { Defines => { default => '' },
+      cppstdin => { default => $Config{cppstdin} },
+      cppflags => { default => $Config{cppflags} },
+      cppminus => { default => $Config{cppminus} },
+      c_styles => { default => ['C++', 'GNU'] },
+      add_cppflags => { default => '' },
+      keywords => { prerequisites => ['c_styles'],
+		    output => sub {
+		      my %kw = %keywords;
+		      my %add;
+		      for ( @{ shift->{c_styles} } ) {
+			%add = %{ $style_keywords{$_} };
+			%kw = (%kw, %add);
+		      }
+		      \%kw;
+		    }, },
+      text => { class_filter => [ 'text', 'C::Preprocessed',
+				  qw(filename Defines includeDirs Cpp)] },
+      text_only_from => { class_filter => [ 'text_only_from', 'C::Preprocessed',
+					    qw(filename filename Defines includeDirs Cpp)] },
+      includes => { filter => [ \&includes, 
+				qw(filename Defines includeDirs Cpp) ], },
+      includeDirs =>  { prerequisites => ['filedir'], 
+			output => sub {
+			  my $data = shift;
+			  [ $data->{filedir}, '/usr/local/include', '.'];
+			} },
+      Cpp => { prerequisites => [qw(cppminus add_cppflags cppflags cppstdin)], 
+	       output => sub {
+		 my $data = shift;
+		 return { cppstdin => $data->{cppstdin},
+			  cppflags => "$data->{cppflags} $data->{add_cppflags}",
+			  cppminus => $data->{cppminus} };
+	       } },
+      filedir => { output => sub { dirname ( shift->{filename} || '.' ) } },
+      sanitized => { filter => [ \&sanitize, 'text'], },
+      toplevel => { filter => [ \&top_level, 'sanitized'], },
+      no_type_decl => { filter => [ \&remove_type_decl, 'toplevel'], },
+      typedef_chunks => { filter => [ \&typedef_chunks, 'toplevel'], },
+      typedefs_maybe => { filter => [ \&typedefs_maybe, 
+				      'sanitized', 'typedef_chunks'], },
+      typedef_texts => { filter => [ \&typedef_texts, 
+				      'text', 'typedef_chunks'], },
+      typedef_hash => { prerequisites => ['typedefs_maybe'],
+			output => sub { my %h; 
+					for (@{$_[0]->{typedefs_maybe}}) {
+					  $h{$_}++;
+					}
+					\%h;
+				      }, },
+      defines_maybe => { filter => [ \&defines_maybe, 'filename'], },
+      defines_no_args => { prerequisites => ['defines_maybe'],
+			   output => sub { shift->{defines_maybe}->[0] }, },
+      defines_args => { prerequisites => ['defines_maybe'],
+			output => sub { shift->{defines_maybe}->[1] }, },
+      decl_inlines => { filter => [ \&functions_in, 'no_type_decl'], },
+      inline_chunks => { filter => [ sub { shift->[0] }, 'decl_inlines'], },
+      inlines => { filter => [ \&from_chunks, 'inline_chunks', 'text'], },
+      decl_chunks => { filter => [ sub { shift->[1] }, 'decl_inlines'], },
+      decls => { filter => [ \&from_chunks, 'decl_chunks', 'text'], },
+      fdecl_chunks => { filter => [ sub { shift->[4] }, 'decl_inlines'], },
+      fdecls => { filter => [ \&from_chunks, 'fdecl_chunks', 'text'], },
+      mdecl_chunks => { filter => [ sub { shift->[2] }, 'decl_inlines'], },
+      mdecls => { filter => [ \&from_chunks, 'mdecl_chunks', 'text'], },
+      vdecl_chunks => { filter => [ sub { shift->[3] }, 'decl_inlines'], },
+      vdecls => { filter => [ \&from_chunks, 'vdecl_chunks', 'text'], },
+      parsed_fdecls => { filter => [ \&do_declarations, 'fdecls', 
+				     'typedef_hash', 'keywords'], },
+    };
+
+sub from_chunks {
+  my $chunks = shift;
+  my $txt = shift;
+  my @out;
+  my $i = 0;
+  while ($i < @$chunks) {
+    push @out, substr $txt, $chunks->[$i], $chunks->[ $i + 1 ] - $chunks->[$i];
+    $i += 2;
+  }
+  \@out;
+}
+
+#sub process { request($recipes, @_) }
+# Preloaded methods go here.
+
+sub includes {
+  my %seen;
+  my $stream = new C::Preprocessed (@_)
+    or die "Cannot open pipe from cppstdin: $!\n";
+  
+  while (<$stream>) {
+    next unless m(^\s*\#\s*	# Leading hash
+		  (line\s*)?	# 1: Optional line
+		  ([0-9]+)\s*	# 2: Line number
+		  (.*)		# 3: The rest
+		 )x;
+    my $include = $3;
+    $include = $1 if $include =~ /"(.*)"/; # Filename may be in quotes
+    $seen{$include}++ if $include ne "";
+  }
+  [keys %seen];
+}
+
+sub defines_maybe {
+  my $file = shift;
+  my ($mline,$line,%macros,%macrosargs,$sym,$args);
+  open(C, $file) or die "Cannot open file $file: $!\n";
+  while (not eof(C) and $line = <C>) {
+    next unless 
+      ( $line =~ s[
+		   ^ \s* \# \s*	# Start of directive
+		   define \s+
+		   (\w+)	# 1: symbol
+		   (?:
+		    \( (.*?) \s* \) # 2: Minimal match for arguments
+                                    # in parenths (without trailing
+                                    # spaces)
+		   )?		# optional, no grouping
+		   \s+		# rest is the definition
+		  ][]x );
+    ($sym, $args) = ($1, $2);
+    $mline = $';
+    $mline .= <C> while not eof(C) and $mline =~ s/\\\n/\n/;
+    chomp $mline;
+    #print "sym: `$sym', args: `$args', mline: `$mline'\n";
+    if (defined $args) {
+      $macrosargs{$sym} = [ [split /\s*,\s*/, $args], $mline];
+    } else {
+      $macros{$sym} = $mline;
+    }
+  }
+  close(C) or die "Cannot close file $file: $!\n";
+  [\%macros, \%macrosargs];
+}
+
+# sub nexttypedef {
+#   return unless $_[0] =~ /(\G|^|;)\s*typedef\b/g;
+#   my $start = pos($_[0]) - 7;
+#   nextsemi($_[0]);
+#   my $end = pos $_[0];
+#   # warn "Found `", substr($_[0], $start, $end - $start), "'\n" if $debug;
+#   return $start, $end;
+# }  
+
+# sub nextsemi {
+#   my $n = 0;
+#   while ($_[0] =~ /([\(\{\[])|([\]\)\}])|(\;)/g) {
+#     $n++ if defined $1;
+#     $n-- if defined $2;
+#     return if defined $3 and $n == 0;
+#   }
+#   die "No semicolon on the outer level";
+# }
+
+sub typedef_texts {
+  my ($txt, $chunks) = (shift, shift);
+  my ($b, $e, @out);
+  my @in = @$chunks;
+  while (($b, $e) = splice @in, 0, 2) {
+    push @out, substr($txt, $b, $e - $b);
+  }
+  [@out];
+}
+
+sub typedef_chunks {		# Input is toplevel, output: starts and ends
+  my $txt = shift;
+  pos $txt = 0;
+  my ($b, $e, @out);
+  while ($txt =~ /\btypedef\b/g) {
+    push @out, pos $txt;
+    $txt =~ /;|\Z/g;
+    push @out, pos $txt;
+  }
+  \@out;
+}
+
+# The output is the list of list of inline chunks and list of
+# declaration chunks.
+
+sub functions_in {		# The arg is text without type declarations.
+  my $in = shift;		# remove_type_decl(top_level(sanitize($txt)));
+  # What remains now consists of variable and function declarations,
+  # and inline functions.
+  $in =~ /(?=\S)/g;
+  my ($b, $e, $b1, $e1, @inlines, @decls, @mdecls, @fdecls, @vdecls);
+  $b = pos $in;
+  my $chunk;
+  while ($b ne length $in) {
+    $in =~ /;/g or pos $in = $b, $in =~ /.*\S|\Z/g ; # Or last non-space
+    $e = pos $in;
+    $chunk = substr $in, $b, $e - $b;
+    # Now subdivide the chunk.
+    # 
+    # What we got is one chunk, probably finished by `;'. Whoever, it
+    # may start with several inline functions.
+    #
+    # Note that inline functions contain ( ) { } in the stripped version.
+    $b1 = 0;
+    while ($chunk =~ /\(\s*\)\s*\{\s*\}/g) {
+      $e1 = pos $chunk;
+      push @inlines, $b + $b1, $b + $e1;
+      $chunk =~ /(?=\S)/g;
+      $b1 = pos $chunk; 
+      $b1 = length $chunk, last unless defined $b1;
+    }
+    if ($e - $b - $b1 > 0) {
+      push @decls, $b + $b1, $e;
+      substr ($chunk, 0, $b1) = '';
+      if ($chunk =~ /,/) {	# Contains multiple declarations.
+	push @mdecls, $b + $b1, $e;
+      } else  {			# Non-multiple.
+	my $isvar = 1;
+	$chunk =~ s{
+		    \s* ( ( const
+			    | __attribute__ \s* \( \s* \)
+			  ) \s* )* ( ; \s* )? \Z # Strip from the end
+		   }()x;
+	if ($chunk =~ /\)\Z/) { # Function declaration ends on ")"!
+	  if ($chunk !~ m{ 
+			  \( .* \( # Multiple parenths
+			 }x
+	      and $chunk =~ / \w \s* \( /x) { # Most probably pointer to a function?
+	    $isvar = 0;
+	  }
+	}
+	if ($isvar)  {	# Heuristically variable
+	  push @vdecls, $b + $b1, $e;
+	} else {
+	  push @fdecls, $b + $b1, $e;
+	}
+      }
+    }
+    $in =~ /\G\s*/g ;
+    $b = pos $in;
+  }
+  [\@inlines, \@decls, \@mdecls, \@vdecls, \@fdecls];
+}
+
+sub typedefs_maybe {		# Input is sanitized text, and list of beg/end.
+  my @lst = @{$_[1]};
+  my @out;
+  my ($b, $e);
+  while ($b = shift @lst) {
+    $e = shift @lst;
+    push @out, typedef_words(substr $_[0], $b, $e - $b);
+  }
+  \@out;
+}
+
+sub typedef_words {		# Input is sanitized.
+  my $in = shift;		# Text of typedef.
+  # Remove all the structs
+  my ($rest, $start) = $in;
+  while ($rest =~ s/\b(struct|union|class|enum)(\s+\w+)?\s*\{//) {
+    $rest = $';
+    $start .= $`;
+    pos $rest = 0;
+    matchingbrace($rest);
+    $rest = substr $rest, pos $rest;
+  }
+  $in = $start . $rest;
+  # Remove arguments of functions (heuristics only): 
+  # paren word comma
+  # paren word space non-paren
+  # start a list of arguments. (May be "cdecl *myfunc"?) XXXXX ?????
+  while ( $in =~ /\(\s*\w+(,|\s+[^\)\s])/g ) {
+    pos $in = $start = pos($in) - length($&) + 1; # Cannot use $` because of optimizations
+    matchingbrace($in);
+    substr ($in, $start, pos($in) - 1 - $start) = '';
+  } 
+  # Remove array specifiers
+  $in =~ s/\[[\w\s]*\]/ /g;
+  # Several words in a row cannot be new typedefs, but the last one.
+  $in =~ s/(\w+\s+)+(?=[^\s,;\[\{\)])//g;
+  ( $in =~ /(\w+)/g );
+}
+
+sub matchingbrace {
+  # pos($_[0]) is after the opening brace now
+  my $n = 0;
+  while ($_[0] =~ /([\{\[\(])|([\]\)\}])/g) {
+    $1 ? $n++ : $n-- ;
+    return 1 if $n < 0;
+  }
+  # pos($_[0]) is after the closing brace now
+  return "";				# false
+}
+
+sub remove_Comments_no_Strings { # We expect that no strings are around
+    my $in = shift;
+    $in =~ s,/(/.*|\*[\s\S]*?\*/),,g ; # C and C++
+    die "Unfinished comment" if $in =~ m,/\*, ;
+    $in;
+}
+
+sub sanitize {		# We expect that no strings are around
+    my $in = shift;
+    # C and C++, strings and characters
+    $in =~ s{ / ( 
+		 / .*			# C++ style
+		 |
+		 \* [\s\S]*? \*/	# C style
+		)			# (1)
+		| '([^\\\']|\\.)+'	# (2) Character constants
+		  | "([^\\\"]|\\.)*"	# (3) Strings
+		    | ( ^ \s* \# .* 	# (4) Preprocessor
+			( \\ $ .* )* )	# and continuation lines
+	    } {
+	      # We want to preserve the length, so that one may go back
+	      defined $1 ? ' ' x length $1 :
+		defined $4 ? ' ' x length $4 :
+		  defined $2 ? "'" . ' ' x length($2) . "'" :
+		    defined $3 ? '"' . ' ' x length($3) . '"' : '???'
+	    }xgem ;
+    die "Unfinished comment" if $in =~ m{ /\* }x;
+    $in;
+}
+
+sub top_level {			# We expect argument is sanitized
+  # Note that this may remove the variable in declaration: int (*func)();
+  my $in = shift;
+  my $start;
+  my $out = $in;
+  while ($in =~ /[\[\{\(]/g ) {
+    $start = pos $in;
+    matchingbrace($in);
+    substr($out, $start, pos($in) - 1 - $start) 
+      = ' ' x (pos($in) - 1 - $start);
+  }
+  $out;
+}
+
+sub remove_type_decl {		# We suppose that the arg is top-level only.
+  my $in = shift;
+  $in =~ s/(\btypedef\b.*?;)/' ' x length $1/gse;
+  # The following form may appear only in the declaration of the type itself:
+  $in =~ 
+    s/(\b(enum|struct|union|class)\b[\s\w]*\{\s*\}\s*;)/' ' x length $1/gse;
+  $in;
+}
+
+sub new { shift; my $out = new DataFlow $recipes;  $out->set(@_); $out}
+
+sub do_declarations {
+  my @d = map do_declaration($_, $_[1], $_[2]), @{ $_[0] };
+  \@d;
+}
+
+# Forth argument: if defined, there maybe no identifier. Generate one
+# basing on this argument.
+
+sub do_declaration {
+  my ($decl, $typedefs, $keywords, $argnum) = @_;
+  $decl =~ s/;?\s*$//;
+  my ($type, $typepre, $typepost, $ident, $args, $w, $pos);
+  $pos = 0;
+  while ($decl =~ /(\w+)/g and ($typedefs->{$1} or $keywords->{$1})) {
+    $w = $1;
+    if ($w =~ /^(struct|class|enum|union)$/) {
+      $decl =~ /\G\s+\w+/g or die "`$w' is not followed by word in `$decl'";
+    }
+    $pos = pos $decl;
+  }
+  pos $decl = $pos;
+  $decl =~ /\G[\s*]*\*/g or pos $decl = $pos;
+  $type = substr $decl, 0, pos $decl;
+  $decl =~ /\G\s*/g or pos $decl = length $type; # ????
+  $pos = pos $decl;
+  if (defined $argnum) {
+    if ($decl =~ /\G(\w+)/g) {
+      $ident = $1;
+      $pos = pos $decl;
+    } else {
+      pos $decl = $pos = length $decl;
+      $type = $decl;
+      $ident = "arg$argnum";
+    }
+  } else {
+    die "Cannot process declaration `$decl' without an identifier" 
+      unless $decl =~ /\G(\w+)/g;
+    $ident = $1;
+    $pos = pos $decl;
+  }
+  $decl =~ /\G\s*/g or pos $decl = $pos;
+  $pos = pos $decl;
+  if (pos $decl != length $decl) {
+    pos $decl = $pos;
+    die "Expecting parenth after identifier in `$decl'" 
+      unless $decl =~ /\G\(/g;
+    my $argstring = substr($decl, pos($decl) - length $decl);
+    matchingbrace($argstring) or die "Cannot find matching parenth in `$decl'";
+    $argstring = substr($argstring, 0, pos($argstring) - 1);
+    $argstring =~ s/ ^ ( \s* void )? \s* $ //x;
+    $args = [];
+    my @args;
+    if ($argstring ne '') {
+      my $top = top_level $argstring;
+      my $p = 0;
+      my $arg;
+      while ($top =~ /,/g) {
+	$arg = substr($argstring, $p, pos($top) - 1 - $p);
+	$arg =~ s/^\s+|\s+$//gs;
+	push @args, $arg;
+	$p = pos $top;
+      }
+      $arg = substr $argstring, $p;
+      $arg =~ s/^\s+|\s+$//gs;
+      push @args, $arg;
+    }
+    my $i = 0;
+    for (@args) {
+      push @$args, do_declaration1($_, $typedefs, $keywords, $i++);
+    }
+  }
+  [$type, $ident, $args, $decl];
+}
+
+sub do_declaration1 {
+  my ($decl, $typedefs, $keywords, $argnum) = @_;
+  $decl =~ s/;?\s*$//;
+  my ($type, $typepre, $typepost, $ident, $args, $w, $pos);
+  $pos = 0;
+  while ($decl =~ /(\w+)/g and ($typedefs->{$1} or $keywords->{$1})) {
+    $w = $1;
+    if ($w =~ /^(struct|class|enum|union)$/) {
+      $decl =~ /\G\s+\w+/g or die "`$w' is not followed by word in `$decl'";
+    }
+    $pos = pos $decl;
+  }
+  pos $decl = $pos;
+  $decl =~ /\G[\s*]*\*/g or pos $decl = $pos;
+  $type = substr $decl, 0, pos $decl;
+  $decl =~ /\G\s*/g or pos $decl = length $type; # ????
+  $pos = pos $decl;
+  if (defined $argnum) {
+    if ($decl =~ /\G(\w+)/g) {
+      $ident = $1;
+      $pos = pos $decl;
+    } else {
+      pos $decl = $pos = length $decl;
+      $type = $decl;
+      $ident = "arg$argnum";
+    }
+  } else {
+    die "Cannot process declaration `$decl' without an identifier" 
+      unless $decl =~ /\G(\w+)/g;
+    $ident = $1;
+    $pos = pos $decl;
+  }
+  $decl =~ /\G\s*/g or pos $decl = $pos;
+  $pos = pos $decl;
+  if (pos $decl != length $decl) {
+    pos $decl = $pos;
+    die "Expecting parenth after identifier in `$decl'" 
+      unless $decl =~ /\G\(/g;
+    my $argstring = substr($decl, pos($decl) - length $decl);
+    matchingbrace($argstring) or die "Cannot find matching parenth in `$decl'";
+    $argstring = substr($argstring, 0, pos($argstring) - 1);
+    $argstring =~ s/ ^ ( \s* void )? \s* $ //x;
+    $args = [];
+    my @args;
+    if ($argstring ne '') {
+      my $top = top_level $argstring;
+      my $p = 0;
+      my $arg;
+      while ($top =~ /,/g) {
+	$arg = substr($argstring, $p, pos($top) - 1 - $p);
+	$arg =~ s/^\s+|\s+$//gs;
+	push @args, $arg;
+	$p = pos $top;
+      }
+      $arg = substr $argstring, $p;
+      $arg =~ s/^\s+|\s+$//gs;
+      push @args, $arg;
+    }
+    my $i = 0;
+    for (@args) {
+      push @$args, do_declaration2($_, $typedefs, $keywords, $i++);
+    }
+  }
+  [$type, $ident, $args, $decl];
+}
+
+############################################################
+
+package C::Preprocessed;
+use POSIX 'closedir';		# gensym only, not exported
+use File::Basename;
+use Config;
+
+sub new {
+    die "usage: C::Preprocessed->new(filename[, defines[, includes[, cpp]]])" 
+      if @_ < 2 or @_ > 5;
+    my ($class, $filename, $Defines, $Includes, $Cpp) 
+      = (shift, shift, shift, shift);
+    $Cpp ||= \%Config::Config;
+    my $filedir = dirname $filename || '.';
+    $Includes ||= [$filedir, '/usr/local/include', '.'];
+    my $addincludes = "";
+    $addincludes = "-I" . join(" -I", @$Includes)
+      if defined $Includes and @$Includes;
+    my($sym) = $class->POSIX::gensym;
+    open($sym, 
+	 "cat $filename | $Cpp->{cppstdin} $Defines $addincludes $Cpp->{cppflags} $Cpp->{cppminus} |" )
+      and bless $sym => $class;
+}
+
+sub text {
+  my $class = shift;
+  my $stream = $class->new(@_);
+  my $oh = select $stream;
+  $/ = undef;
+  select $oh;
+  <$stream>;
+}
+
+sub text_only_from {
+  my $class = shift;
+  my $from = shift || die "Expecting argument in `text_only_from'";
+  my $stream = $class->new(@_);
+  my $on = $from eq $_[0];
+  my $eqregexp = $on ? '\"\"|' : '';
+  my @out;
+  while (<$stream>) {
+    #print;
+    
+    $on = /$eqregexp[\"\/]\Q$from\"/ if /^\#/;
+    push @out, $_ if $on;
+  }
+  join '', @out;
+}
+
+sub DESTROY {
+  close($_[0]) 
+    or die "Cannot close pipe from `$Config::Config{cppstdin}': err $?, $!\n";
+}
+
+# Autoload methods go after __END__, and are processed by the autosplit program.
+# Return to the principal package.
+package C::Scan;
+
+1;
+__END__
+
+=head1 NAME
+
+C::Scan - scan C language files for easily recognized constructs.
+
+=head1 DESCRIPTION
+
+=head2 Service
+
+=over 10
+
+=item includes
+
+Arguments: filename, optional string with "defines" to use,
+and optional reference to a list of include directories.
+
+Output: list of included files.
+
+=item defines_maybe
+
+Argument: filename.
+
+Output: reference to a list containing reference to hash of macros
+without arguments, and reference to hash of macros with arguments. The
+values of the second hash are references to an array of length 2, the
+first element is a reference to the list of arguments, the second one
+being the expansion.  Both have newlines unescaped, thus
+
+  #define A B
+  #define C(x,y) E\
+                 F
+
+will finish with the first hash being C<("A" =E<gt> "B")>, the second 
+one with C<("C" =E<gt> [ ["x", "y"], "E\nF"])>.
+
+=back
+
+=cut
