@@ -33,3 +33,8 @@
 	  (Thanks to Michael G Schwern.)
 	Change POSIX to Symbol.  (Thanks to Mike Blazer.)
 	Include C9X keywords.
+0.61:	String and char literals were processed by (...)+, thus $1
+	contained the last char only.
+	The leading '/' in comments was not counted in the length.
+	(Thanks to Martin Cowie and Steven Knight for reporting and
+	fixing these problems.)

@@ -19,7 +19,7 @@ use strict;			# Earlier it catches ISA and EXPORT.
 # this flag tells cpp to only output macros
 $C::Scan::MACROS_ONLY = '-dM';
 
-$C::Scan::VERSION = '0.6';
+$C::Scan::VERSION = '0.61';
 
 my (%keywords,%style_keywords);
 for (qw(asm auto break case char continue default do double else enum
@@ -419,13 +419,13 @@ sub sanitize {		# We expect that no strings are around
 		 |
 		 \* [\s\S]*? \*/	# C style
 		)			# (1)
-		| '([^\\\']|\\.)+'	# (2) Character constants
-		  | "([^\\\"]|\\.)*"	# (3) Strings
-		    | ( ^ \s* \# .* 	# (4) Preprocessor
-			( \\ $ .* )* )	# and continuation lines
+	     | '((?:[^\\\']|\\.)+)'	# (2) Character constants
+	     | "((?:[^\\\"]|\\.)*)"	# (3) Strings
+	     | ( ^ \s* \# .* 		# (4) Preprocessor
+		 ( \\ $ .* )* )		# and continuation lines
 	    } {
 	      # We want to preserve the length, so that one may go back
-	      defined $1 ? ' ' x length $1 :
+	      defined $1 ? ' ' x (1 + length $1) :
 		defined $4 ? ' ' x length $4 :
 		  defined $2 ? "'" . ' ' x length($2) . "'" :
 		    defined $3 ? '"' . ' ' x length($3) . '"' : '???'
