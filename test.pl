@@ -8,7 +8,7 @@
 # Change 1..1 below to 1..last_test_to_print .
 # (It may become useful if the test is moved to ./t subdirectory.)
 
-BEGIN { $| = 1; print "1..18\n"; }
+BEGIN { $| = 1; print "1..17\n"; }
 END {print "not ok 1\n" unless $::loaded;}
 require 'dumpvar.pl';
 use strict;
@@ -119,19 +119,13 @@ my $tds = $c->get('typedef_structs');
 print STDOUT "ok $test\n";
 $test++;
 
-my $vh = $c->get('vdecl_hash');
-
-print STDOUT "ok $test\n";
-$test++;
-
 select(FILE);
 
 dumpValue({defines_no_args => $dna, defines_args => $da, 
 	   typedef_texts => $t, typedefs_maybe => $td, inlines => $fi, 
 	   mdecls => $mde, vdecls => $vde, fdecls => $fde, 
 	   parsed_fdecls => $fdec, typedef_hash => $tdh,
-	   typedef_whited => $tdw, typedef_structs => $tds,
-	   vdecl_hash => $vh});
+	   typedef_whited => $tdw, typedef_structs => $tds});
 
 
 print STDOUT "ok $test\n";
