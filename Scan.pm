@@ -19,7 +19,7 @@ use strict;			# Earlier it catches ISA and EXPORT.
 # this flag tells cpp to only output macros
 $C::Scan::MACROS_ONLY = '-dM';
 
-$C::Scan::VERSION = '0.61';
+$C::Scan::VERSION = '0.70';
 
 my (%keywords,%style_keywords);
 for (qw(asm auto break case char continue default do double else enum
@@ -90,17 +90,13 @@ my $recipes
       full_toplevel => { filter => [ \&top_level, 'full_sanitized'], },
       no_type_decl => { filter => [ \&remove_type_decl, 'toplevel'], },
       typedef_chunks => { filter => [ \&typedef_chunks, 'full_toplevel'], },
-      typedefs_maybe => { filter => [ \&typedefs_maybe, 
+      typedefs_maybe => { filter => [ sub {[keys %{+shift}]}, 'typedef_hash'], },
+      typedefs_whited => { filter => [ \&typedefs_whited,
 				      'full_sanitized', 'typedef_chunks'], },
-      typedef_texts => { filter => [ \&typedef_texts, 
+      typedef_texts => { filter => [ \&typedef_texts,
 				      'full_text', 'typedef_chunks'], },
-      typedef_hash => { prerequisites => ['typedefs_maybe'],
-			output => sub { my %h; 
-					for (@{$_[0]->{typedefs_maybe}}) {
-					  $h{$_}++;
-					}
-					\%h;
-				      }, },
+      typedef_hash => { filter => [ \&typedef_hash,
+				    'typedef_texts', 'typedefs_whited'], },
       defines_maybe => { filter => [ \&defines_maybe, 'filename'], },
       defines_no_args => { prerequisites => ['defines_maybe'],
 			   output => sub { shift->{defines_maybe}->[0] }, },
@@ -148,7 +144,7 @@ sub includes {
   my %seen;
   my $stream = new C::Preprocessed (@_)
     or die "Cannot open pipe from cppstdin: $!\n";
-  
+
   while (<$stream>) {
     next unless m(^\s*\#\s*	# Leading hash
 		  (line\s*)?	# 1: Optional line
@@ -179,9 +175,9 @@ sub defines_maybe {
                                     # spaces)
 		   )?		# optional, no grouping
 		   \s*		# rest is the definition
+		   ([\s\S]*)	# 3: the rest
 		  ][]x );
-    ($sym, $args) = ($1, $2);
-    $mline = $';
+    ($sym, $args, $mline) = ($1, $2, $3);
     $mline .= <C> while not eof(C) and $mline =~ s/\\\n/\n/;
     chomp $mline;
     #print "sym: `$sym', args: `$args', mline: `$mline'\n";
@@ -205,7 +201,7 @@ sub defines_full {
 
   my $stream = new C::Preprocessed (@_)
     or die "Cannot open pipe from cppstdin: $!\n";
-  
+
   while (defined ($line = <$stream>)) {
     next unless 
       ( $line =~ s[
@@ -218,9 +214,9 @@ sub defines_full {
                                     # spaces)
 		   )?		# optional, no grouping
 		   \s*		# rest is the definition
+		   ([\s\S]*)	# 3: the rest
 		  ][]x );
-    ($sym, $args) = ($1, $2);
-    $mline = $';
+    ($sym, $args, $mline) = ($1, $2, $3);
     $mline .= <$stream> while ($mline =~ s/\\\n/\n/);
     chomp $mline;
 #print STDERR "sym: `$sym', args: `$args', mline: `$mline'\n";
@@ -264,13 +260,96 @@ sub typedef_texts {
   [@out];
 }
 
+sub typedef_hash_old {
+  +{ map {($_,1)} map /(\w+)/, @{$_[0]} };
+}
+
+sub typedef_hash {
+  my ($typedefs, $whited) = (shift,shift);
+  my %out;
+
+ loop:
+  for my $o (0..$#$typedefs) {
+    my $wh = $whited->[$o];
+    my $td = $typedefs->[$o];
+    if ($wh =~ /,/ or not $wh =~ /\w/) { # Hard case, guessimates ...
+      # Determine whether the new thingies are inside parens
+      $wh =~ /,/g;
+      my $p = pos $wh;
+      my ($s, $e);
+      if (matchingbrace($wh)) {	# Inside.  Easy part: just split on /,/...
+	$e = pos($wh) - 1;
+	$s = $e;
+	my $d = 0;
+	# Skip back
+	while (--$s >= 0) {
+	  my $c = substr $wh, $s, 1;
+	  if ($c =~ /[\(\{\[]/) {
+	    $d--;
+	  } elsif ($c =~ /[\)\]\}]/) {
+	    $d++;
+	  }
+	  last if $d < 0;
+	}
+	if ($s < 0) {		# Should not happen
+	  warn("panic: could not match braces in\n\t$td\nwhited as\n\t$wh\n");
+	  next loop;
+	}
+	$s++;
+      } else {			# We are at toplevel
+	# We need to skip back all the modifiers attached to the first thingy
+	# Guesstimates: everything after the first '*' (inclusive)
+	pos $wh = 0;
+	$wh = /(?=\w)/g;
+	my $ws = pos $wh;
+	my $pre = substr $wh, 0, $ws;
+	$s = $ws;
+	$s = pos $pre if $pre =~ /(?=\*)/g;
+	$e = length $wh;
+      }
+      # Now: need to split $td based on commas in $wh!
+      # And need to split each chunk of $td based on word in the chunk of $wh!
+      my $td_decls = substr($td, $s, $e - $s);
+      my ($pre, $post) = (substr($td, 0, $s), substr($td, $e));
+      my $wh_decls = substr($wh, $s, $e - $s);
+      my @wh_decls = split /,/, $wh_decls;
+      my $td_s = 0;
+      my (@td_decl, @td_pre, @td_post, @td_word);
+      for my $wh_d (@wh_decls) {
+	my $td_d = substr $td, $td_s, length $wh_d;
+	push @td_decl, $td_d;
+	$wh_d =~ /(\w+)/g;
+	push @td_word, $1;
+	push @td_post, substr $td_d, pos($wh_d);
+	push @td_pre,  substr $td_d, pos($wh_d) - length $1, length $1;
+	$td_s += 1 + length $wh_d; # Skip over ','
+      }
+      for my $i (0..$#wh_decls) {
+	my $p = "$td_post[$i]$post";
+	$p = '' unless $p =~ /\S/;
+	$out{$td_word[$i]} = ["$pre$td_pre[$i]", $p];
+      }
+    } else {			# Only one thing defined...
+      $wh =~ /(\w+)/g;
+      my $e	= pos $wh;
+      my $s	= $e - length $1;
+      my $type	= $1;
+      my $pre	= substr $td, 0, $s;
+      my $post	= substr $td, $e, length($td) - $e;
+      $post = '' unless $post =~ /\S/;
+      $out{$type} = [$pre, $post];
+    }
+  }
+  \%out;
+}
+
 sub typedef_chunks {		# Input is toplevel, output: starts and ends
   my $txt = shift;
   pos $txt = 0;
   my ($b, $e, @out);
   while ($txt =~ /\btypedef\b/g) {
     push @out, pos $txt;
-    $txt =~ /;|\Z/g;
+    $txt =~ /(?=;)|\Z/g;
     push @out, pos $txt;
   }
   \@out;
@@ -338,59 +417,89 @@ sub functions_in {		# The arg is text without type declarations.
   [\@inlines, \@decls, \@mdecls, \@vdecls, \@fdecls];
 }
 
-sub typedefs_maybe {		# Input is sanitized text, and list of beg/end.
+sub typedefs_whited {		# Input is sanitized text, and list of beg/end.
   my @lst = @{$_[1]};
   my @out;
   my ($b, $e);
   while ($b = shift @lst) {
     $e = shift @lst;
-    push @out, typedef_words(substr $_[0], $b, $e - $b);
+    push @out, whited_decl(substr $_[0], $b, $e - $b);
   }
   \@out;
 }
 
-sub typedef_words {		# Input is sanitized.
-  my $in = shift;		# Text of typedef.
-  # Remove all the structs
+# XXXX This is heuristical in many respects...
+# Recipe: remove all struct-ish chunks.  Remove all array specifiers.
+# Remove GCC attribute specifiers.
+# What remains may contain function's arguments, old types, and newly
+# defined types.
+# Remove function arguments using heuristics methods.
+# Now out of several words in a row the last one is a newly defined type.
+
+sub whited_decl {		# Input is sanitized.
+  my $in = shift;		# Text of a declaration
   my $rest  = $in;
-  my $start = "";
-  while ($rest =~ s/\b(struct|union|class|enum)(\s+\w+)?\s*\{//) {
-    $rest = $';
-    $start .= $`;
-    pos $rest = 0;
-    matchingbrace($rest);
-    $rest = substr $rest, pos $rest;
+  my $out  = $in;		# Whited out $in
+
+  # Remove all the structs
+  while ($out =~ /(\b(struct|union|class|enum)(\s+\w+)?\s*\{)/g) {
+    my $pos_start = pos($out) - length $1;
+
+    matchingbrace($out);
+    my $pos_end = pos $out;
+    substr($out, $pos_start, $pos_end - $pos_start) =
+	' ' x ($pos_end - $pos_start);
+    pos $out = $pos_end;
   }
-  $in = $start . $rest;
 
   # Deal with glibc's wierd ass __attribute__ tag.  Just dump it.
   # Maaaybe this should check to see if you're using GCC, but I don't
   # think so since glibc is nice enough to do that for you.  [MGS]
-  if ( $in =~ m/\b(__attribute__|attribute)\s*\((?=\s*\()/g ) {
-      my $att_pos_start = pos($in) - length($&);
+  while ( $out =~ m/(\b(__attribute__|attribute)\s*\((?=\s*\())/g ) {
+      my $att_pos_start = pos($out) - length($1);
 
       # Need to figure out where ((..)) ends.
-      matchingbrace($in);
-      my $att_pos_end = pos $in;
+      matchingbrace($out);
+      my $att_pos_end = pos $out;
 
       # Remove the __attribute__ tag.
-      substr($in, $att_pos_start, $att_pos_end - $att_pos_start) = '';
+      substr($out, $att_pos_start, $att_pos_end - $att_pos_start) =
+	' ' x ($att_pos_end - $att_pos_start);
+      pos $out = $att_pos_end;
   }
 
-  # Remove arguments of functions (heuristics only): 
+  # Remove arguments of functions (heuristics only):
   # paren word comma
   # paren word space non-paren
   # start a list of arguments. (May be "cdecl *myfunc"?) XXXXX ?????
-  while ( $in =~ /\(\s*\w+(,|\s+[^\)\s])/g ) {
-    pos $in = $start = pos($in) - length($&) + 1; # Cannot use $` because of optimizations
-    matchingbrace($in);
-    substr ($in, $start, pos($in) - 1 - $start) = '';
-  } 
+  while ( $out =~ /(\(\s*\w+(,|\s+[^\)\s]))/g ) {
+    my $pos_start = pos($out) - length($1);
+    pos $out = $pos_start + 1;
+    matchingbrace($out);
+    substr ($out, $pos_start + 1, pos($out) - 2 - $pos_start)
+      = ' ' x (pos($out) - 2 - $pos_start);
+  }
   # Remove array specifiers
-  $in =~ s/\[[\w\s]*\]/ /g;
+  $out =~ s/(\[[\w\s]*\])/ ' ' x length $1 /ge;
+  my $tout = $out;
   # Several words in a row cannot be new typedefs, but the last one.
-  $in =~ s/(\w+\s+)+(?=[^\s,;\[\{\)])//g;
-  ( $in =~ /(\w+)/g );
+  $out =~ s/((\w+\s+)+(?=[^\s,;\[\{\)]))/ ' ' x length $1 /ge;
+  unless ($out =~ /\w/) {
+    # Probably a function-type declaration: typedef int f(int);
+    # Redo scan leaving the last word of the first group of words:
+    $tout =~ /(\w+\s+)*(\w+)/g;
+    $out = ' ' x (pos($tout) - length $2)
+      . $2 . ' ' x (length($tout) - pos($tout));
+    # warn "function typedef\n\t'$in'\nwhited-out as\n\t'$out'\n";
+  }
+  warn "panic: length mismatch\n\t'$in'\nwhited-out as\n\t'$out'\n"
+    if length($in) != length $out;
+  # Sanity check
+  warn "panic: multiple types without interwening comma in\n\t$in\nwhited-out as\n\t$out\n"
+    if $out =~ /\w[^\w,]+\w/;
+  warn "panic: no types found in\n\t$in\nwhited-out as\n\t$out\n"
+    unless $out =~ /\w/;
+  $out
 }
 
 sub matchingbrace {
@@ -414,7 +523,7 @@ sub remove_Comments_no_Strings { # We expect that no strings are around
 sub sanitize {		# We expect that no strings are around
     my $in = shift;
     # C and C++, strings and characters
-    $in =~ s{ / ( 
+    $in =~ s{ / (
 		 / .*			# C++ style
 		 |
 		 \* [\s\S]*? \*/	# C style
@@ -454,13 +563,16 @@ sub remove_type_decl {		# We suppose that the arg is top-level only.
   # The following form may appear only in the declaration of the type itself:
   $in =~ 
     s/(\b(enum|struct|union|class)\b[\s\w]*\{\s*\}\s*;)/' ' x length $1/gse;
+  # Pre-declarations:
+  $in =~ 
+    s/(\b(enum|struct|union|class)\b[\s\w]*;)/' ' x length $1/gse;
   $in;
 }
 
-sub new { 
-  my $class = shift; 
-  my $out = SUPER::new $class $recipes;  
-  $out->set(@_); 
+sub new {
+  my $class = shift;
+  my $out = SUPER::new $class $recipes;
+  $out->set(@_);
   $out;
 }
 
@@ -501,7 +613,7 @@ sub do_declaration {
       $ident = "arg$argnum";
     }
   } else {
-    die "Cannot process declaration `$decl' without an identifier" 
+    die "Cannot process declaration `$decl' without an identifier"
       unless $decl =~ /\G(\w+)/g;
     $ident = $1;
     $pos = pos $decl;
@@ -658,7 +770,7 @@ sub text_only_from {
   my @out;
   while (<$stream>) {
     #print;
-    
+
     $on = /$eqregexp[\"\/]\Q$from\"/ if /^\#/;
     push @out, $_ if $on;
   }
@@ -686,7 +798,7 @@ C::Scan - scan C language files for easily recognized constructs.
   $c = new C::Scan 'filename' => $filename, 'filename_filter' => $filter,
                    'add_cppflags' => $addflags;
   $c->set('includeDirs' => [$Config::Config{shrpdir}]);
-  
+
   my $fdec = $c->get('parsed_fdecls');
 
 
@@ -762,6 +874,11 @@ C<mod> is the string of array modifiers.
 =item C<typedef_hash>
 
 Value: a reference to a hash which contains known C<typedef>s as keys.
+Values of the hash are array references of length 2, with what should
+be put before/after the type for a standalone typedef declaration (but
+without the C<typedef> substring).
+
+Parse uses naive heuristics.
 
 =item C<typedef_texts>
 
@@ -770,8 +887,7 @@ C<typedef>s.
 
 =item C<typedefs_maybe>
 
-Value: a reference to a list of C<typedef>ed names. (Syncronized with
-C<typedef_texts>).
+Value: a reference to a list of C<typedef>ed names.  Heuristics are used.
 
 =item C<vdecls>
 

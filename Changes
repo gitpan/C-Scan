@@ -38,3 +38,10 @@
 	The leading '/' in comments was not counted in the length.
 	(Thanks to Martin Cowie and Steven Knight for reporting and
 	fixing these problems.)
+0.70:
+	New attribute typedefs_whited (used by typedefs_maybe).
+	Remove trailing semicolons from typedefs.
+	Handle predeclarations (such as struct foo;).
+	Another attempt to remove $` etc.
+	Parse typedefs.
+	typedef_hash's has reasonable values.
